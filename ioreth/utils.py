@@ -31,8 +31,8 @@ def simple_ping(host, timeout=15):
     """
 
     rcode = False
-    cmdline = ["ping", "-c", "4", "-W", "3", host]
-    proc = subprocess.Popen(cmdline)
+    cmdline = ["ping", "-c", "4", "-W", "3", "-q", host]
+    proc = subprocess.Popen(cmdline, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     try:
         proc.communicate(timeout=timeout)
     except subprocess.TimeoutExpired as exc:

@@ -23,6 +23,7 @@ import configparser
 import os
 import re
 import random
+import sqlite3
 
 logging.basicConfig()
 logger = logging.getLogger(__name__)
@@ -35,14 +36,13 @@ from . import remotecmd
 from . import utils
 
 
-def is_br_callsign(callsign):
-    return bool(re.match("P[PTUY][0-9].+", callsign.upper()))
-
 
 class BotAprsHandler(aprs.Handler):
     def __init__(self, callsign, client):
         aprs.Handler.__init__(self, callsign)
         self._client = client
+        self.conn = sqlite3.connect("/opt/ioreth/ioreth.db")
+
 
     def on_aprs_message(self, source, addressee, text, origframe, msgid=None, via=None):
         """Handle an APRS message.
@@ -88,8 +88,17 @@ class BotAprsHandler(aprs.Handler):
         if len(qry_args) == 2:
             args = qry_args[1]
 
+        curdate = time.strftime("%Y%m%d%H%M%S")
+        cur = self.conn.cursor()
+        dupe_check = cur.execute ("SELECT * FROM debouncer WHERE callsign = ? AND message = ? AND datetime > ?", (source,qry,(int(curdate)-30)))
+        if dupe_check.fetchone() is None:
+            cur.execute("INSERT INTO debouncer(callsign, message, datetime) VALUES (?, ?, ?)", (source,qry,curdate))
+            self.conn.commit()
+        else:
+            logger.info("Ignoring Dupe Message from %s", source)
+            return
+
         random_replies = {
-            "moria": "Pedo mellon a minno",
             "mellon": "*door opens*",
             "mellon!": "**door opens**  🚶🚶🚶🚶🚶🚶🚶🚶🚶  💍→🌋",
             "meow": "=^.^=  purr purr  =^.^=",
@@ -106,6 +115,38 @@ class BotAprsHandler(aprs.Handler):
                 .split("::", 2)
             )
             self.send_aprs_msg(source, tmp_lst[0] + ":")
+        elif qry == "netcheckin" or qry == "cq":
+            net = args.lstrip().split(" ", 1)[0]
+            if self.aprs_net_checkin(source, net):
+                self.send_aprs_msg(source, "OK, Net Check in for " + net + " Successful!")
+            else:
+                self.send_aprs_msg(source, "OK, Net Check in for " + net + " Failed. Uh oh") 
+        elif qry == "netcheckout":
+            net = args.lstrip().split(" ", 1)[0]
+            if self.aprs_net_checkout(source, net):
+                self.send_aprs_msg(source, "OK, Net Check out for " + net + " Successful! 73!")
+            else:
+                self.send_aprs_msg(source, "OK, Net Check out for " + net + " Failed. Uh oh") 
+        elif qry == "netusers":
+            net = args.lstrip().split(" ", 1)[0]
+            try:
+                flags = args.lstrip().split(" ", 1)[1]
+            except IndexError:
+                flags = None  # flags
+
+            if flags == "all":
+                self.aprs_net_userlist(source, net, True)
+            else:
+                self.aprs_net_userlist(source, net, False)
+        elif qry == "netmsg":
+            net = args.lstrip().split(" ", 1)[0]
+            try:
+                message = args.lstrip().split(" ", 1)[1]
+            except IndexError:
+               self.send_aprs_msg(source, "Pretty cowardly not giving me a message to send!")
+               return
+            self.aprs_net_blastmessage(source, net, message)
+
         elif qry == "version":
             self.send_aprs_msg(source, "Python " + sys.version.replace("\n", " "))
         elif qry == "time":
@@ -117,14 +158,72 @@ class BotAprsHandler(aprs.Handler):
         elif qry in random_replies:
             self.send_aprs_msg(source, random_replies[qry])
         else:
-            if is_br_callsign(source):
-                self.send_aprs_msg(
-                    source, "Sou um bot. Envie 'help' para a lista de comandos"
-                )
+            self.send_aprs_msg(source, "I'm a bot. Send 'help' for command list")
+
+    def aprs_net_checkin(self, from_call, net):
+        logger.info("Checking in %s to APRS Net %s.", from_call, net)
+        try: 
+            curdate = time.strftime("%Y%m%d")
+            cur = self.conn.cursor()
+            cur.execute("INSERT INTO netcontrol(callsign, net_name, date) VALUES(?, ?, ?)", (from_call, net, curdate))
+            self.conn.commit()
+            return True 
+        except Exception:
+            return False
+
+    def aprs_net_checkout(self, from_call, net):
+        logger.info("Checking out %s from APRS Net %s.", from_call, net)
+        try: 
+            conn = sqlite3.connect("/opt/ioreth/ioreth.db")
+            curdate = time.strftime("%Y%m%d")
+            cur = self.conn.cursor()
+            cur.execute("DELETE FROM netcontrol WHERE callsign = ? AND net_name = ?", (from_call, net))
+            self.conn.commit()
+            return True 
+        except Exception:
+            return False
+        return True 
+
+    def aprs_net_userlist(self, from_call, net, all):
+        logger.info("Sending APRS Net user list to %s for APRS Net %s.", from_call, net)
+        try:
+            curdate = time.strftime("%Y%m%d")
+            cur = self.conn.cursor()
+            if (all):
+                cur.execute("SELECT callsign FROM netcontrol WHERE callsign = ? AND net_name = ? AND date = ?", (from_call, net, curdate))
             else:
-                self.send_aprs_msg(source, "I'm a bot. Send 'help' for command list")
+                cur.execute("SELECT callsign FROM netcontrol WHERE callsign = ? AND net_name = ? AND date = ? LIMIT 5", (from_call, net, curdate))
+            rows = cur.fetchall()
+            message = 'Current Calls for ' + net + ': '
+            for row in rows:
+                if len(row[0]) > 50:
+                    self.send_aprs_msg(from_call, message)
+                    message = ''
+                message = message + ' ' + row[0]
+            self.send_aprs_msg(from_call, message)
+            self.conn.commit()
+            return True 
+        except Exception:
+            return False
+
+    def aprs_net_blastmessage(self, from_call, net, message):
+        logger.info("Sending APRS Net message to %s from %s.", net, from_call)
+        try:
+            curdate = time.strftime("%Y%m%d")
+            cur = self.conn.cursor()
+            cur.execute("SELECT callsign FROM netcontrol WHERE callsign = ? AND net_name = ? AND date = ?", (from_call, net, curdate))
+            rows = cur.fetchall()
+            for row in rows:
+                self.send_aprs_msg(from_call, from_call + "> " + message)
+                time.sleep(1)
+            self.conn.commit()
+            return True
+        except Exception:
+            return False
+
 
     def send_aprs_msg(self, to_call, text):
+        logger.info("Sending '%s' to %s", to_call, text)
         self._client.enqueue_frame(self.make_aprs_msg(to_call, text))
 
     def send_aprs_status(self, status):

@@ -103,9 +103,9 @@ class TcpKissClient:
 
             while len(self._inbuf) > 3:
                 # FEND, FDATA, escaped_data, FEND, ...
-                if self._inbuf[0] != ord(TcpKissClient.FEND):
-                    raise ValueError("Bad frame start")
-                lst = self._inbuf[2:].split(TcpKissClient.FEND, 1)
+                #if self._inbuf[0] != ord(TcpKissClient.FEND):
+                #    raise ValueError("Bad frame start")
+                lst = self._inbuf[1:].split(TcpKissClient.FEND, 1)
                 if len(lst) > 1:
                     self._inbuf = lst[1]
                     frame = (
@@ -165,7 +165,7 @@ class AprsClient(TcpKissClient):
     def on_recv(self, frame_bytes):
         try:
             frame = ax25.Frame.from_kiss_bytes(frame_bytes)
-            logger.info("RECV: %s", str(frame))
+            logger.debug("RECV: %s", str(frame))
             self.on_recv_frame(frame)
         except Exception as exc:
             logger.warning(exc)
